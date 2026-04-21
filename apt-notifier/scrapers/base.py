@@ -34,6 +34,7 @@ class Scraper(ABC):
             ctx = await browser.new_context(
                 user_agent=random.choice(USER_AGENTS),
                 locale="he-IL",
+                viewport={"width": 1920, "height": 1080},
                 extra_http_headers={
                     "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
                 },

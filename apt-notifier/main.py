@@ -7,7 +7,7 @@ from scrapers import (
     Yad2Scraper,
     HomelessScraper,
     MadlanScraper,
-    WindoScraper,
+    WinwinScraper,
     KomoScraper,
 )
 from filters import passes_filters, relevance_score
@@ -24,7 +24,7 @@ _SCRAPERS = [
     Yad2Scraper,
     HomelessScraper,
     MadlanScraper,
-    WindoScraper,
+    WinwinScraper,
     KomoScraper,
 ]
 
