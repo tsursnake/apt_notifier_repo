@@ -1,13 +1,11 @@
 import json
 import logging
-import re
-import requests
 from bs4 import BeautifulSoup
+from playwright.async_api import BrowserContext
 from .base import Scraper
 
 logger = logging.getLogger(__name__)
 
-# Madlan (Compass Israel) uses a GraphQL endpoint
 _GRAPHQL_URL = "https://www.madlan.co.il/api/graphql"
 _SEARCH_URL = "https://www.madlan.co.il/for-rent/apartments/תל-אביב-יפו"
 
@@ -34,26 +32,19 @@ query SearchListings($filters: ListingSearchFilters!, $pagination: PaginationInp
 class MadlanScraper(Scraper):
     source = "madlan"
 
-    def fetch(self) -> list[dict]:
-        listings = self._fetch_graphql()
-        if not listings:
-            logger.warning("Madlan GraphQL returned nothing, falling back to HTML")
-            listings = self._fetch_html()
+    async def _fetch(self) -> list[dict]:
+        async with self._browser() as ctx:
+            listings = await self._fetch_graphql(ctx)
+            if not listings:
+                logger.warning("Madlan GraphQL returned nothing, falling back to HTML")
+                listings = await self._fetch_html(ctx)
         return listings
 
     # ------------------------------------------------------------------
     # GraphQL API (preferred)
     # ------------------------------------------------------------------
 
-    def _fetch_graphql(self) -> list[dict]:
-        headers = self.random_headers()
-        headers.update(
-            {
-                "Referer": _SEARCH_URL,
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            }
-        )
+    async def _fetch_graphql(self, ctx: BrowserContext) -> list[dict]:
         variables = {
             "filters": {
                 "dealType": "RENT",
@@ -62,15 +53,21 @@ class MadlanScraper(Scraper):
             },
             "pagination": {"page": 1, "pageSize": 40},
         }
+        body = json.dumps({"query": _QUERY, "variables": variables})
         try:
-            resp = requests.post(
+            resp = await ctx.request.post(
                 _GRAPHQL_URL,
-                json={"query": _QUERY, "variables": variables},
-                headers=headers,
-                timeout=20,
+                data=body,
+                headers={
+                    "Referer": _SEARCH_URL,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
             )
-            resp.raise_for_status()
-            data = resp.json()
+            if not resp.ok:
+                logger.error("Madlan GraphQL returned %d", resp.status)
+                return []
+            data = await resp.json()
         except Exception as exc:
             logger.error("Madlan GraphQL failed: %s", exc)
             return []
@@ -132,17 +129,14 @@ class MadlanScraper(Scraper):
     # HTML fallback
     # ------------------------------------------------------------------
 
-    def _fetch_html(self) -> list[dict]:
+    async def _fetch_html(self, ctx: BrowserContext) -> list[dict]:
         try:
-            resp = requests.get(
-                _SEARCH_URL, headers=self.random_headers(), timeout=20
-            )
-            resp.raise_for_status()
+            html = await self._get_html(ctx, _SEARCH_URL)
         except Exception as exc:
             logger.error("Madlan HTML fetch failed: %s", exc)
             return []
 
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(html, "lxml")
         results = []
 
         script = soup.find("script", {"id": "__NEXT_DATA__"})
@@ -171,8 +165,7 @@ class MadlanScraper(Scraper):
                 continue
             try:
                 data = json.loads(text)
-                items = data.get("listings") or []
-                for item in items:
+                for item in (data.get("listings") or []):
                     norm = self._normalize(item)
                     if norm:
                         results.append(norm)

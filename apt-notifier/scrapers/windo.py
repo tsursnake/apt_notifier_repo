@@ -1,8 +1,8 @@
 import json
 import logging
 import re
-import requests
 from bs4 import BeautifulSoup
+from playwright.async_api import BrowserContext
 from .base import Scraper
 
 logger = logging.getLogger(__name__)
@@ -14,38 +14,39 @@ _API_URL = "https://www.windo.co.il/api/search"
 class WindoScraper(Scraper):
     source = "windo"
 
-    def fetch(self) -> list[dict]:
-        listings = self._fetch_api()
-        if not listings:
-            logger.warning("WindoW API returned nothing, falling back to HTML")
-            listings = self._fetch_html()
+    async def _fetch(self) -> list[dict]:
+        async with self._browser() as ctx:
+            listings = await self._fetch_api(ctx)
+            if not listings:
+                logger.warning("WindoW API returned nothing, falling back to HTML")
+                listings = await self._fetch_html(ctx)
         return listings
 
     # ------------------------------------------------------------------
     # Internal API (preferred)
     # ------------------------------------------------------------------
 
-    def _fetch_api(self) -> list[dict]:
-        headers = self.random_headers()
-        headers.update(
-            {
-                "Referer": _SEARCH_URL,
-                "Accept": "application/json, text/plain, */*",
-            }
-        )
+    async def _fetch_api(self, ctx: BrowserContext) -> list[dict]:
         params = {
             "dealType": "rent",
             "propertyType": "apartment",
             "city": "תל אביב יפו",
-            "page": 1,
-            "limit": 40,
+            "page": "1",
+            "limit": "40",
         }
         try:
-            resp = requests.get(
-                _API_URL, params=params, headers=headers, timeout=20
+            resp = await ctx.request.get(
+                _API_URL,
+                params=params,
+                headers={
+                    "Referer": _SEARCH_URL,
+                    "Accept": "application/json, text/plain, */*",
+                },
             )
-            resp.raise_for_status()
-            data = resp.json()
+            if not resp.ok:
+                logger.error("WindoW API returned %d", resp.status)
+                return []
+            data = await resp.json()
         except Exception as exc:
             logger.error("WindoW API failed: %s", exc)
             return []
@@ -103,29 +104,21 @@ class WindoScraper(Scraper):
     # HTML fallback
     # ------------------------------------------------------------------
 
-    def _fetch_html(self) -> list[dict]:
+    async def _fetch_html(self, ctx: BrowserContext) -> list[dict]:
         try:
-            resp = requests.get(
-                _SEARCH_URL, headers=self.random_headers(), timeout=20
-            )
-            resp.raise_for_status()
+            html = await self._get_html(ctx, _SEARCH_URL)
         except Exception as exc:
             logger.error("WindoW HTML fetch failed: %s", exc)
             return []
 
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(html, "lxml")
         results = []
 
-        # Try __NEXT_DATA__
         script = soup.find("script", {"id": "__NEXT_DATA__"})
         if script and script.string:
             try:
                 nd = json.loads(script.string)
-                items = (
-                    nd.get("props", {})
-                    .get("pageProps", {})
-                    .get("listings", [])
-                )
+                items = nd.get("props", {}).get("pageProps", {}).get("listings", [])
                 for item in items:
                     norm = self._normalize(item)
                     if norm:
@@ -135,15 +128,13 @@ class WindoScraper(Scraper):
             except Exception:
                 pass
 
-        # Try inline JSON blobs
         for script in soup.find_all("script"):
             text = script.string or ""
             match = re.search(r"window\.__STATE__\s*=\s*(\{.+?\});", text, re.S)
             if match:
                 try:
                     state = json.loads(match.group(1))
-                    items = state.get("listings") or []
-                    for item in items:
+                    for item in (state.get("listings") or []):
                         norm = self._normalize(item)
                         if norm:
                             results.append(norm)
@@ -165,17 +156,15 @@ class WindoScraper(Scraper):
                     if digits:
                         price = int(digits)
 
-                results.append(
-                    {
-                        "url": href,
-                        "price": price,
-                        "rooms": None,
-                        "size_m2": None,
-                        "neighborhood": "",
-                        "raw_text": card.get_text(" ", strip=True),
-                        "source": self.source,
-                    }
-                )
+                results.append({
+                    "url": href,
+                    "price": price,
+                    "rooms": None,
+                    "size_m2": None,
+                    "neighborhood": "",
+                    "raw_text": card.get_text(" ", strip=True),
+                    "source": self.source,
+                })
             except Exception:
                 continue
 

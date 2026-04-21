@@ -1,8 +1,8 @@
 import json
 import logging
 import re
-import requests
 from bs4 import BeautifulSoup
+from playwright.async_api import BrowserContext
 from .base import Scraper
 
 logger = logging.getLogger(__name__)
@@ -14,26 +14,19 @@ _API_URL = "https://www.homeless.co.il/api/realestate/search/"
 class HomelessScraper(Scraper):
     source = "homeless"
 
-    def fetch(self) -> list[dict]:
-        listings = self._fetch_api()
-        if not listings:
-            logger.warning("Homeless API returned nothing, falling back to HTML")
-            listings = self._fetch_html()
+    async def _fetch(self) -> list[dict]:
+        async with self._browser() as ctx:
+            listings = await self._fetch_api(ctx)
+            if not listings:
+                logger.warning("Homeless API returned nothing, falling back to HTML")
+                listings = await self._fetch_html(ctx)
         return listings
 
     # ------------------------------------------------------------------
     # Internal API (preferred)
     # ------------------------------------------------------------------
 
-    def _fetch_api(self) -> list[dict]:
-        headers = self.random_headers()
-        headers.update(
-            {
-                "Referer": _SEARCH_URL,
-                "Accept": "application/json, text/plain, */*",
-                "X-Requested-With": "XMLHttpRequest",
-            }
-        )
+    async def _fetch_api(self, ctx: BrowserContext) -> list[dict]:
         payload = {
             "dealType": "rent",
             "propertyTypes": ["apartment"],
@@ -42,15 +35,26 @@ class HomelessScraper(Scraper):
             "pageSize": 40,
         }
         try:
-            resp = requests.post(_API_URL, json=payload, headers=headers, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()
+            resp = await ctx.request.post(
+                _API_URL,
+                data=json.dumps(payload),
+                headers={
+                    "Referer": _SEARCH_URL,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/plain, */*",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            )
+            if not resp.ok:
+                logger.error("Homeless API returned %d", resp.status)
+                return []
+            data = await resp.json()
         except Exception as exc:
             logger.error("Homeless API request failed: %s", exc)
             return []
 
         items = data.get("results") or data.get("items") or data.get("data") or []
-        return [self._normalize(item) for item in items if self._normalize(item)]
+        return [n for item in items if (n := self._normalize(item))]
 
     def _normalize(self, item: dict) -> dict | None:
         url = item.get("url") or item.get("link") or ""
@@ -102,31 +106,23 @@ class HomelessScraper(Scraper):
     # HTML fallback
     # ------------------------------------------------------------------
 
-    def _fetch_html(self) -> list[dict]:
+    async def _fetch_html(self, ctx: BrowserContext) -> list[dict]:
         try:
-            resp = requests.get(
-                _SEARCH_URL, headers=self.random_headers(), timeout=20
-            )
-            resp.raise_for_status()
+            html = await self._get_html(ctx, _SEARCH_URL)
         except Exception as exc:
             logger.error("Homeless HTML fetch failed: %s", exc)
             return []
 
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(html, "lxml")
         results = []
 
-        # Try embedded JSON blob
         for script in soup.find_all("script"):
             text = script.string or ""
             match = re.search(r"window\.__INITIAL_STATE__\s*=\s*(\{.+?\});", text, re.S)
             if match:
                 try:
                     state = json.loads(match.group(1))
-                    items = (
-                        state.get("search", {})
-                        .get("results", {})
-                        .get("items", [])
-                    )
+                    items = state.get("search", {}).get("results", {}).get("items", [])
                     for item in items:
                         norm = self._normalize(item)
                         if norm:
@@ -152,17 +148,15 @@ class HomelessScraper(Scraper):
                     if digits:
                         price = int(digits)
 
-                results.append(
-                    {
-                        "url": href,
-                        "price": price,
-                        "rooms": None,
-                        "size_m2": None,
-                        "neighborhood": "",
-                        "raw_text": card.get_text(" ", strip=True),
-                        "source": self.source,
-                    }
-                )
+                results.append({
+                    "url": href,
+                    "price": price,
+                    "rooms": None,
+                    "size_m2": None,
+                    "neighborhood": "",
+                    "raw_text": card.get_text(" ", strip=True),
+                    "source": self.source,
+                })
             except Exception:
                 continue
 

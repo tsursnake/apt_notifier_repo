@@ -1,6 +1,10 @@
+import asyncio
 import random
 import time
 from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager
+
+from playwright.async_api import async_playwright, BrowserContext
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -14,21 +18,46 @@ USER_AGENTS = [
 class Scraper(ABC):
     source: str = ""
 
-    def random_headers(self) -> dict:
-        return {
-            "User-Agent": random.choice(USER_AGENTS),
-            "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
+    @asynccontextmanager
+    async def _browser(self):
+        """Yield a Playwright BrowserContext with realistic browser headers."""
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            ctx = await browser.new_context(
+                user_agent=random.choice(USER_AGENTS),
+                locale="he-IL",
+                extra_http_headers={
+                    "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
+                },
+            )
+            try:
+                yield ctx
+            finally:
+                await browser.close()
+
+    async def _get_html(self, ctx: BrowserContext, url: str) -> str:
+        """Navigate to url and return the fully-rendered page HTML."""
+        page = await ctx.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            return await page.content()
+        finally:
+            await page.close()
+
+    def fetch(self) -> list[dict]:
+        """Synchronous entry point — wraps the async implementation."""
+        return asyncio.run(self._fetch())
+
+    @abstractmethod
+    async def _fetch(self) -> list[dict]:
+        """Async implementation; override in each scraper.
+
+        Return normalized dicts with keys:
+            url, price, rooms, size_m2, neighborhood, raw_text, source
+        """
 
     def polite_sleep(self) -> None:
         time.sleep(random.uniform(30, 90))
-
-    @abstractmethod
-    def fetch(self) -> list[dict]:
-        """Return list of normalized listing dicts.
-
-        Each dict must contain:
-            url, price, rooms, size_m2, neighborhood, raw_text, source
-        Missing numeric fields should be None.
-        """

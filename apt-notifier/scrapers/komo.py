@@ -1,8 +1,8 @@
 import json
 import logging
 import re
-import requests
 from bs4 import BeautifulSoup
+from playwright.async_api import BrowserContext
 from .base import Scraper
 
 logger = logging.getLogger(__name__)
@@ -14,25 +14,19 @@ _API_URL = "https://komo.co.il/api/listings/search"
 class KomoScraper(Scraper):
     source = "komo"
 
-    def fetch(self) -> list[dict]:
-        listings = self._fetch_api()
-        if not listings:
-            logger.warning("Komo API returned nothing, falling back to HTML")
-            listings = self._fetch_html()
+    async def _fetch(self) -> list[dict]:
+        async with self._browser() as ctx:
+            listings = await self._fetch_api(ctx)
+            if not listings:
+                logger.warning("Komo API returned nothing, falling back to HTML")
+                listings = await self._fetch_html(ctx)
         return listings
 
     # ------------------------------------------------------------------
     # Internal API (preferred)
     # ------------------------------------------------------------------
 
-    def _fetch_api(self) -> list[dict]:
-        headers = self.random_headers()
-        headers.update(
-            {
-                "Referer": _SEARCH_URL,
-                "Accept": "application/json, text/plain, */*",
-            }
-        )
+    async def _fetch_api(self, ctx: BrowserContext) -> list[dict]:
         payload = {
             "dealType": "rent",
             "propertyTypes": ["apartment"],
@@ -41,11 +35,19 @@ class KomoScraper(Scraper):
             "pageSize": 40,
         }
         try:
-            resp = requests.post(
-                _API_URL, json=payload, headers=headers, timeout=20
+            resp = await ctx.request.post(
+                _API_URL,
+                data=json.dumps(payload),
+                headers={
+                    "Referer": _SEARCH_URL,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/plain, */*",
+                },
             )
-            resp.raise_for_status()
-            data = resp.json()
+            if not resp.ok:
+                logger.error("Komo API returned %d", resp.status)
+                return []
+            data = await resp.json()
         except Exception as exc:
             logger.error("Komo API failed: %s", exc)
             return []
@@ -109,28 +111,21 @@ class KomoScraper(Scraper):
     # HTML fallback
     # ------------------------------------------------------------------
 
-    def _fetch_html(self) -> list[dict]:
+    async def _fetch_html(self, ctx: BrowserContext) -> list[dict]:
         try:
-            resp = requests.get(
-                _SEARCH_URL, headers=self.random_headers(), timeout=20
-            )
-            resp.raise_for_status()
+            html = await self._get_html(ctx, _SEARCH_URL)
         except Exception as exc:
             logger.error("Komo HTML fetch failed: %s", exc)
             return []
 
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(html, "lxml")
         results = []
 
         script = soup.find("script", {"id": "__NEXT_DATA__"})
         if script and script.string:
             try:
                 nd = json.loads(script.string)
-                items = (
-                    nd.get("props", {})
-                    .get("pageProps", {})
-                    .get("listings", [])
-                )
+                items = nd.get("props", {}).get("pageProps", {}).get("listings", [])
                 for item in items:
                     norm = self._normalize(item)
                     if norm:
@@ -148,8 +143,7 @@ class KomoScraper(Scraper):
             if match:
                 try:
                     state = json.loads(match.group(1))
-                    items = state.get("listings") or []
-                    for item in items:
+                    for item in (state.get("listings") or []):
                         norm = self._normalize(item)
                         if norm:
                             results.append(norm)
@@ -174,17 +168,15 @@ class KomoScraper(Scraper):
                     if digits:
                         price = int(digits)
 
-                results.append(
-                    {
-                        "url": href,
-                        "price": price,
-                        "rooms": None,
-                        "size_m2": None,
-                        "neighborhood": "",
-                        "raw_text": card.get_text(" ", strip=True),
-                        "source": self.source,
-                    }
-                )
+                results.append({
+                    "url": href,
+                    "price": price,
+                    "rooms": None,
+                    "size_m2": None,
+                    "neighborhood": "",
+                    "raw_text": card.get_text(" ", strip=True),
+                    "source": self.source,
+                })
             except Exception:
                 continue
 
