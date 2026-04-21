@@ -6,11 +6,19 @@ from .base import Scraper
 
 logger = logging.getLogger(__name__)
 
-# Updated endpoint with filter params so the API returns pre-filtered results
-_API_URL = (
+_MOBILE_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+)
+
+# Three API endpoints tried in order; first non-empty result wins
+_MOBILE_API_URL = "https://gw.yad2.co.il/feed-search-legacy/realestate/rent"
+_V1_API_URL     = "https://api.yad2.co.il/v1/realestate/rent"
+_LEGACY_API_URL = (
     "https://gw.yad2.co.il/feed-search-legacy/realestate/rent"
     "?city=5000&roomsMin=2&roomsMax=4&priceMin=5000&priceMax=9000"
 )
+
 _SEARCH_URL = "https://www.yad2.co.il/realestate/rent?city=5000"
 _BASE_LISTING_URL = "https://www.yad2.co.il/item/"
 
@@ -22,18 +30,86 @@ class Yad2Scraper(Scraper):
         async with self._browser() as ctx:
             listings = await self._fetch_api(ctx)
             if not listings:
-                logger.warning("Yad2 API returned nothing, falling back to HTML scrape")
+                logger.warning("Yad2: all API endpoints empty, falling back to HTML scrape")
                 listings = await self._fetch_html(ctx)
         return listings
 
     # ------------------------------------------------------------------
-    # Internal JSON API (preferred)
+    # Internal JSON API — three endpoints tried in order
     # ------------------------------------------------------------------
 
     async def _fetch_api(self, ctx: BrowserContext) -> list[dict]:
+        # 1. Mobile endpoint — least guarded, pre-filtered params
+        results = await self._try_mobile_api(ctx)
+        if results:
+            return results
+
+        # 2. v1 REST endpoint
+        results = await self._try_v1_api(ctx)
+        if results:
+            return results
+
+        # 3. Legacy gw endpoint
+        results = await self._try_legacy_api(ctx)
+        return results
+
+    async def _try_mobile_api(self, ctx: BrowserContext) -> list[dict]:
+        params = {
+            "city": "5000",
+            "rooms": "2-4",
+            "price": "5000-9000",
+            "forceLdLoad": "true",
+        }
         try:
             resp = await ctx.request.get(
-                _API_URL,
+                _MOBILE_API_URL,
+                params=params,
+                headers={
+                    "User-Agent": _MOBILE_UA,
+                    "x-app-version": "5.18.0",
+                    "x-device-type": "mobile",
+                    "Referer": "https://www.yad2.co.il/",
+                    "Accept": "application/json, text/plain, */*",
+                },
+            )
+            if not resp.ok:
+                logger.warning("Yad2 mobile API: %d", resp.status)
+                return []
+            data = await resp.json()
+        except Exception as exc:
+            logger.warning("Yad2 mobile API failed: %s", exc)
+            return []
+
+        items = self._extract_items_from_api_response(data)
+        logger.info("Yad2 mobile API: %d items", len(items))
+        return [n for item in items if item.get("type") == "ad" and (n := self._normalize_api_item(item))]
+
+    async def _try_v1_api(self, ctx: BrowserContext) -> list[dict]:
+        try:
+            resp = await ctx.request.get(
+                _V1_API_URL,
+                params={"city": "5000", "rooms": "2-4", "price": "5000-9000"},
+                headers={
+                    "Referer": "https://www.yad2.co.il/realestate/rent",
+                    "Accept": "application/json, text/plain, */*",
+                },
+            )
+            if not resp.ok:
+                logger.warning("Yad2 v1 API: %d", resp.status)
+                return []
+            data = await resp.json()
+        except Exception as exc:
+            logger.warning("Yad2 v1 API failed: %s", exc)
+            return []
+
+        items = self._extract_items_from_api_response(data)
+        logger.info("Yad2 v1 API: %d items", len(items))
+        return [n for item in items if item.get("type") == "ad" and (n := self._normalize_api_item(item))]
+
+    async def _try_legacy_api(self, ctx: BrowserContext) -> list[dict]:
+        try:
+            resp = await ctx.request.get(
+                _LEGACY_API_URL,
                 headers={
                     "Referer": "https://www.yad2.co.il/realestate/rent",
                     "Origin": "https://www.yad2.co.il",
@@ -41,23 +117,31 @@ class Yad2Scraper(Scraper):
                 },
             )
             if not resp.ok:
-                logger.error("Yad2 API returned %d", resp.status)
+                logger.warning("Yad2 legacy API: %d", resp.status)
                 return []
             data = await resp.json()
         except Exception as exc:
-            logger.error("Yad2 API request failed: %s", exc)
+            logger.warning("Yad2 legacy API failed: %s", exc)
             return []
 
-        items = data.get("data", {}).get("feed", {}).get("feed_items", [])
-        if not items:
-            # Some API responses wrap feed_items inside pages[]
-            pages = data.get("data", {}).get("feed", {}).get("pages", [])
-            for page in pages:
-                if isinstance(page, dict):
-                    items.extend(page.get("feed_items", []))
-
-        logger.info("Yad2 API: got %d raw feed items", len(items))
+        items = self._extract_items_from_api_response(data)
+        logger.info("Yad2 legacy API: %d items", len(items))
         return [n for item in items if item.get("type") == "ad" and (n := self._normalize_api_item(item))]
+
+    def _extract_items_from_api_response(self, data: dict) -> list:
+        """Handle both flat feed_items and paginated pages[] shapes."""
+        feed = data.get("data", {}).get("feed", {})
+        if not isinstance(feed, dict):
+            feed = {}
+
+        items = feed.get("feed_items", [])
+        if items:
+            return items
+
+        for page in feed.get("pages", []):
+            if isinstance(page, dict):
+                items.extend(page.get("feed_items", []))
+        return items
 
     def _normalize_api_item(self, item: dict) -> dict | None:
         token = item.get("id") or item.get("orderId")

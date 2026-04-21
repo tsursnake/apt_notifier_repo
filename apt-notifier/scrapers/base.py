@@ -24,7 +24,12 @@ class Scraper(ABC):
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+                ignore_default_args=["--enable-automation"],
             )
             ctx = await browser.new_context(
                 user_agent=random.choice(USER_AGENTS),
@@ -32,6 +37,10 @@ class Scraper(ABC):
                 extra_http_headers={
                     "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
                 },
+            )
+            # Hide the headless fingerprint from JS-based bot detectors
+            await ctx.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             )
             try:
                 yield ctx
