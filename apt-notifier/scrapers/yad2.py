@@ -6,9 +6,10 @@ from .base import Scraper
 
 logger = logging.getLogger(__name__)
 
+# Updated endpoint with filter params so the API returns pre-filtered results
 _API_URL = (
     "https://gw.yad2.co.il/feed-search-legacy/realestate/rent"
-    "?city=5000&propertyGroup=apartments&page=1&rows=40"
+    "?city=5000&roomsMin=2&roomsMax=4&priceMin=5000&priceMax=9000"
 )
 _SEARCH_URL = "https://www.yad2.co.il/realestate/rent?city=5000"
 _BASE_LISTING_URL = "https://www.yad2.co.il/item/"
@@ -48,6 +49,14 @@ class Yad2Scraper(Scraper):
             return []
 
         items = data.get("data", {}).get("feed", {}).get("feed_items", [])
+        if not items:
+            # Some API responses wrap feed_items inside pages[]
+            pages = data.get("data", {}).get("feed", {}).get("pages", [])
+            for page in pages:
+                if isinstance(page, dict):
+                    items.extend(page.get("feed_items", []))
+
+        logger.info("Yad2 API: got %d raw feed items", len(items))
         return [n for item in items if item.get("type") == "ad" and (n := self._normalize_api_item(item))]
 
     def _normalize_api_item(self, item: dict) -> dict | None:
@@ -115,21 +124,19 @@ class Yad2Scraper(Scraper):
         soup = BeautifulSoup(html, "lxml")
         results = []
 
-        # Yad2 (Next.js) embeds full feed in __NEXT_DATA__
         script = soup.find("script", {"id": "__NEXT_DATA__"})
-        if script and script.string:
+        if not (script and script.string):
+            logger.warning("Yad2: no __NEXT_DATA__ script found in page")
+        else:
             try:
                 next_data = json.loads(script.string)
-                feed_items = (
-                    next_data.get("props", {})
-                    .get("pageProps", {})
-                    .get("dehydratedState", {})
-                    .get("queries", [{}])[0]
-                    .get("state", {})
-                    .get("data", {})
-                    .get("feed", {})
-                    .get("feed_items", [])
+                # Debug: log the raw structure so we can see what Yad2 actually returns
+                logger.debug(
+                    "Yad2 __NEXT_DATA__ (first 2000 chars): %s",
+                    json.dumps(next_data, ensure_ascii=False)[:2000],
                 )
+                feed_items = self._extract_feed_items(next_data)
+                logger.info("Yad2 HTML: extracted %d feed items from __NEXT_DATA__", len(feed_items))
                 for item in feed_items:
                     if item.get("type") == "ad":
                         listing = self._normalize_api_item(item)
@@ -140,7 +147,8 @@ class Yad2Scraper(Scraper):
             except Exception as exc:
                 logger.warning("Yad2 __NEXT_DATA__ parse failed: %s", exc)
 
-        for card in soup.select("div[class*='feeditem']"):
+        # Last-resort: visible feed cards (JS-rendered, may be empty in headless)
+        for card in soup.select("div[class*='feeditem'], div[class*='feed-item']"):
             try:
                 link_tag = card.select_one("a[href]")
                 href = link_tag["href"] if link_tag else ""
@@ -168,3 +176,78 @@ class Yad2Scraper(Scraper):
                 continue
 
         return results
+
+    def _extract_feed_items(self, next_data: dict) -> list:
+        """Try every known __NEXT_DATA__ shape Yad2 has used, then recurse."""
+        dehydrated = (
+            next_data.get("props", {})
+            .get("pageProps", {})
+            .get("dehydratedState", {})
+        )
+        if not isinstance(dehydrated, dict):
+            logger.debug("Yad2: dehydratedState is not a dict: %s", type(dehydrated))
+            return _recursive_find_list(next_data, "feed_items")
+
+        queries = dehydrated.get("queries", [])
+        logger.debug("Yad2: found %d queries in dehydratedState", len(queries))
+
+        for i, query in enumerate(queries):
+            if not isinstance(query, dict):
+                logger.debug("Yad2: queries[%d] is %s, skipping", i, type(query))
+                continue
+
+            state = query.get("state", {})
+            if not isinstance(state, dict):
+                continue
+
+            data = state.get("data")
+            if data is None:
+                continue
+
+            # Shape 1: data.feed.feed_items (standard)
+            if isinstance(data, dict):
+                feed = data.get("feed", {})
+                if isinstance(feed, dict):
+                    items = feed.get("feed_items", [])
+                    if items:
+                        logger.debug("Yad2: found feed_items via queries[%d].state.data.feed", i)
+                        return items
+
+                # Shape 2: data.pages[].feed.feed_items (infinite query / pagination)
+                pages = data.get("pages", [])
+                if pages:
+                    combined = []
+                    for page in pages:
+                        if isinstance(page, dict):
+                            combined.extend(
+                                page.get("feed", {}).get("feed_items", [])
+                            )
+                    if combined:
+                        logger.debug("Yad2: found feed_items via queries[%d] paginated pages", i)
+                        return combined
+
+            # Shape 3: data is a list of feed items directly
+            if isinstance(data, list) and data and isinstance(data[0], dict) and "type" in data[0]:
+                logger.debug("Yad2: data is a direct list at queries[%d]", i)
+                return data
+
+        # Nuclear fallback: walk the whole JSON tree
+        logger.debug("Yad2: falling back to recursive search for feed_items")
+        return _recursive_find_list(next_data, "feed_items")
+
+
+def _recursive_find_list(obj, key: str) -> list:
+    """Return the first list value found for `key` anywhere in the JSON tree."""
+    if isinstance(obj, dict):
+        if key in obj and isinstance(obj[key], list):
+            return obj[key]
+        for v in obj.values():
+            result = _recursive_find_list(v, key)
+            if result:
+                return result
+    elif isinstance(obj, list):
+        for item in obj:
+            result = _recursive_find_list(item, key)
+            if result:
+                return result
+    return []
