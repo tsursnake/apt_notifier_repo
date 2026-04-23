@@ -1,7 +1,0 @@
-price_min: 5000
-price_max: 9000
-rooms_min: 2
-rooms_max: 4
-neighborhoods: []
-score_threshold: 50
-run_interval_seconds: 300
