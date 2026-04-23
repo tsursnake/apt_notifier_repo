@@ -22,6 +22,7 @@ Return ONLY valid JSON array, no markdown, no preamble."""
 
 
 async def parse_listings(text: str) -> list[dict]:
+    logger.info("Haiku input (%d chars): %s", len(text), text[:300])
     response = await _client.messages.create(
         model="claude-haiku-4-5",
         max_tokens=4096,
@@ -35,7 +36,10 @@ async def parse_listings(text: str) -> list[dict]:
         messages=[{"role": "user", "content": text}],
     )
     raw = response.content[0].text.strip()
+    logger.info("Haiku raw response: %s", raw[:1000])
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```\s*$", "", raw)
-    logger.debug("Haiku raw output: %s", raw[:500])
-    return json.loads(raw)
+    listings = json.loads(raw)
+    for i, listing in enumerate(listings):
+        logger.info("Parsed listing[%d]: %s", i, listing)
+    return listings

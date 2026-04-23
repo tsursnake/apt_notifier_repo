@@ -35,13 +35,17 @@ class DistillPayload(BaseModel):
 
 
 def _passes_filters(listing: dict) -> bool:
+    url = listing.get("url") or listing.get("raw", "")[:60]
     if listing.get("exclude"):
+        logger.info("Filtered [roommate/sublet]: %s", url)
         return False
     price = listing.get("price")
     if price is not None and (price < 5000 or price > 9000):
+        logger.info("Filtered [price=%s out of 5000-9000]: %s", price, url)
         return False
     rooms = listing.get("rooms")
     if rooms is not None and (rooms < 2 or rooms > 4):
+        logger.info("Filtered [rooms=%s out of 2-4]: %s", rooms, url)
         return False
     return True
 
@@ -55,7 +59,9 @@ def health():
 async def webhook(payload: DistillPayload):
     source_url = payload.source_url
     content = payload.content
+    logger.info("Webhook received: source=%s title=%r content_len=%d", source_url, payload.title, len(content))
     if not content:
+        logger.info("Webhook rejected: no content in payload")
         return {"processed": 0, "sent": 0, "error": "no content in payload"}
 
     try:
