@@ -18,9 +18,20 @@ app = FastAPI()
 
 
 class DistillPayload(BaseModel):
-    url: str
-    text: str
+    url: str = ""
+    watch_url: str = ""
+    text: str = ""
+    diff: str = ""
+    title: str = ""
     selector: str = ""
+
+    @property
+    def source_url(self) -> str:
+        return self.url or self.watch_url
+
+    @property
+    def content(self) -> str:
+        return self.text or self.diff
 
 
 def _passes_filters(listing: dict) -> bool:
@@ -42,8 +53,13 @@ def health():
 
 @app.post("/webhook")
 async def webhook(payload: DistillPayload):
+    source_url = payload.source_url
+    content = payload.content
+    if not content:
+        return {"processed": 0, "sent": 0, "error": "no content in payload"}
+
     try:
-        listings = await parse_listings(payload.text)
+        listings = await parse_listings(content)
     except Exception as exc:
         logger.error("Parse failed: %s", exc)
         return {"processed": 0, "sent": 0, "error": str(exc)}
@@ -52,8 +68,8 @@ async def webhook(payload: DistillPayload):
     sent = 0
     for listing in listings:
         if _passes_filters(listing):
-            if await send(listing, payload.url):
+            if await send(listing, source_url):
                 sent += 1
 
-    logger.info("Webhook processed=%d sent=%d source=%s", processed, sent, payload.url)
+    logger.info("Webhook processed=%d sent=%d source=%s", processed, sent, source_url)
     return {"processed": processed, "sent": sent}
