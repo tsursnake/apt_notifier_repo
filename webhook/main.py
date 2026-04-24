@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from parser import parse_listings
 from notifier import send
 
@@ -44,8 +44,25 @@ def health():
     return {"status": "ok"}
 
 
+async def _process(content: str, source_url: str) -> None:
+    try:
+        listings = await parse_listings(content)
+    except Exception as exc:
+        logger.error("Parse failed: %s", exc)
+        return
+
+    processed = len(listings)
+    sent = 0
+    for listing in listings:
+        if _passes_filters(listing):
+            if await send(listing, source_url):
+                sent += 1
+
+    logger.info("Background processed=%d sent=%d source=%s", processed, sent, source_url)
+
+
 @app.post("/webhook")
-async def webhook(request: Request):
+async def webhook(request: Request, background_tasks: BackgroundTasks):
     body = await request.json()
     logger.info("Webhook received keys: %s", list(body.keys()))
 
@@ -63,20 +80,7 @@ async def webhook(request: Request):
     logger.info("Webhook: source=%s title=%r content_len=%d", source_url, title, len(content))
     if not content:
         logger.info("Webhook rejected: no content in payload")
-        return {"processed": 0, "sent": 0, "error": "no content in payload"}
+        return {"status": "error", "error": "no content in payload"}
 
-    try:
-        listings = await parse_listings(content)
-    except Exception as exc:
-        logger.error("Parse failed: %s", exc)
-        return {"processed": 0, "sent": 0, "error": str(exc)}
-
-    processed = len(listings)
-    sent = 0
-    for listing in listings:
-        if _passes_filters(listing):
-            if await send(listing, source_url):
-                sent += 1
-
-    logger.info("Webhook processed=%d sent=%d source=%s", processed, sent, source_url)
-    return {"processed": processed, "sent": sent}
+    background_tasks.add_task(_process, content, source_url)
+    return {"status": "queued"}

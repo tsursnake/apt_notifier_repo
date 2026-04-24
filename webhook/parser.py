@@ -5,7 +5,7 @@ from anthropic import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
 
-_client = AsyncAnthropic()
+_client = AsyncAnthropic(timeout=8.0)
 
 _SYSTEM = """You are a real estate listing parser for Israeli apartments in Tel Aviv.
 Extract apartment listings from the text. For each listing return a JSON array:
