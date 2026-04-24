@@ -3,8 +3,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+from bs4 import BeautifulSoup
+from fastapi import FastAPI, Request
 from parser import parse_listings
 from notifier import send
 
@@ -16,22 +16,11 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+_CONTENT_FIELDS = ["diff", "text", "message", "body", "current_snapshot"]
 
-class DistillPayload(BaseModel):
-    url: str = ""
-    watch_url: str = ""
-    text: str = ""
-    diff: str = ""
-    title: str = ""
-    selector: str = ""
 
-    @property
-    def source_url(self) -> str:
-        return self.url or self.watch_url
-
-    @property
-    def content(self) -> str:
-        return self.text or self.diff
+def _strip_html(raw: str) -> str:
+    return BeautifulSoup(raw, "lxml").get_text(separator=" ", strip=True)
 
 
 def _passes_filters(listing: dict) -> bool:
@@ -56,10 +45,22 @@ def health():
 
 
 @app.post("/webhook")
-async def webhook(payload: DistillPayload):
-    source_url = payload.source_url
-    content = payload.content
-    logger.info("Webhook received: source=%s title=%r content_len=%d", source_url, payload.title, len(content))
+async def webhook(request: Request):
+    body = await request.json()
+    logger.info("Webhook received keys: %s", list(body.keys()))
+
+    source_url = body.get("url") or body.get("watch_url") or ""
+    title = body.get("title") or ""
+
+    content = ""
+    for field in _CONTENT_FIELDS:
+        value = body.get(field, "")
+        if value and value.strip():
+            content = _strip_html(value)
+            logger.info("Using field %r for content (%d chars)", field, len(content))
+            break
+
+    logger.info("Webhook: source=%s title=%r content_len=%d", source_url, title, len(content))
     if not content:
         logger.info("Webhook rejected: no content in payload")
         return {"processed": 0, "sent": 0, "error": "no content in payload"}
